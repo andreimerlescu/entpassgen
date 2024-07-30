@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	_ "embed"
 	"encoding/json"
@@ -130,6 +131,24 @@ func DeliverResults(passwords map[string]Password, destination io.Writer) {
 	}
 }
 
+func redirectOutput(w io.Writer, done chan bool) (*os.File, error) {
+	old := os.Stdout
+	r, w2, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	os.Stdout = w2
+
+	go func() {
+		var buf bytes.Buffer
+		io.Copy(&buf, r)
+		cleanedOutput := cleanOutput(buf.String())
+		w.Write([]byte(cleanedOutput))
+		done <- true
+	}()
+	return old, nil
+}
+
 func main() {
 	flag.Parse()
 
@@ -234,6 +253,23 @@ func main() {
 	} else {
 		destination = os.Stdout
 	}
+
+	// Create channels to manage spinner output and JSON output
+	spinnerDone := make(chan bool)
+	jsonDone := make(chan bool)
+
+	// Redirect output for spinner
+	oldStdout, err := redirectOutput(os.Stdout, spinnerDone)
+	if err != nil {
+		log.Fatalf("Failed to redirect stdout: %v", err)
+	}
+
+	// Run the spinner
+	go func() {
+		startTime := time.Now()
+		showSpinner(startTime, spinnerDone)
+	}()
+
 	cleanedStdout := &cleanWriter{writer: destination}
 	for {
 		var newPassword string
@@ -260,6 +296,11 @@ func main() {
 			break
 		}
 	}
+
+	// Restore the original os.Stdout and signal spinner to stop
+	os.Stdout = oldStdout
+	spinnerDone <- true
+	<-jsonDone
 }
 
 func generateWordPassword(wordCount int) (string, error) {
@@ -419,7 +460,7 @@ func calculateAverageEntropy(count int) (float64, float64, float64, float64) {
 	for _, chunk := range chunks {
 		chunk := chunk
 		wg.Add(1)
-		go func() {
+		go func(chunk int) {
 			defer wg.Done()
 			var localTotalEntropy, localMinEntropy, localMaxEntropy float64
 			localMinEntropy = math.MaxFloat64
@@ -454,7 +495,7 @@ func calculateAverageEntropy(count int) (float64, float64, float64, float64) {
 				maxEntropy = localMaxEntropy
 			}
 			mu.Unlock()
-		}()
+		}(chunk)
 		wg.Wait()
 	}
 
