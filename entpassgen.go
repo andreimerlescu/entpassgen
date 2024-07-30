@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/rand"
 	_ "embed"
 	"encoding/json"
@@ -39,11 +38,15 @@ var (
 	symbols                  string
 	excludeSymbols           string
 	minEntropy               string
-	acceptableUppercase      string = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-	acceptableLowercase      string = "abcdefghijklmnopqrstuvwxyz"
-	acceptableDigits         string = "0123456789"
-	acceptableWordSeparators string = "!@#$%^&*()_+1234567890-=,.></?;:[]|"
-	acceptableSymbols        string = "!@#$%^&*()_+=-[]\\{}|;':,./<>?"
+	acceptableUppercase      string              = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	acceptableLowercase      string              = "abcdefghijklmnopqrstuvwxyz"
+	acceptableDigits         string              = "0123456789"
+	acceptableWordSeparators string              = "!@#$%^&*()_+1234567890-=,.></?;:[]|"
+	acceptableSymbols        string              = "!@#$%^&*()_+=-[]\\{}|;':,./<>?"
+	passwords                map[string]Password = map[string]Password{}
+	stdOutJSONFile           *os.File
+	stdOutTEXTFile           *os.File
+	stdOutProgressFile       *os.File
 )
 
 func init() {
@@ -90,12 +93,12 @@ type Sample struct {
 	Max         float64 `json:"max,omitempty"`
 }
 
-func PrintJSON(in interface{}) {
+func PrintJSON(in interface{}, w io.Writer) {
 	jsonBytes, jsonErr := json.Marshal(in)
 	if jsonErr != nil {
 		log.Fatalf("Can't marshal Entropy object. Error: %v", jsonErr)
 	} else {
-		fmt.Printf("%s", string(jsonBytes))
+		fmt.Fprintf(w, "%s", string(jsonBytes))
 	}
 }
 
@@ -109,46 +112,30 @@ func AsJSON(in interface{}) string {
 	return ""
 }
 
-func DeliverResults(passwords map[string]Password, destination io.Writer) {
+func DeliverResults(passwords map[string]Password) {
+
 	var results []Password
 	for _, p := range passwords {
 		results = append(results, p)
 	}
 	if len(results) == 1 {
 		if showJSON {
-			fmt.Fprintf(destination, "%s\n", AsJSON(results[0]))
+			PrintJSON(results[0], stdOutJSONFile)
 		} else {
-			fmt.Fprintf(destination, results[0].Value)
+			fmt.Fprintf(stdOutTEXTFile, results[0].Value)
 		}
 	} else {
 		if showJSON {
-			fmt.Fprintf(destination, "%s\n", AsJSON(results))
+			PrintJSON(results, stdOutJSONFile)
 		} else {
 			for _, p := range results {
-				fmt.Fprintf(destination, "%s\n", p.Value)
+				fmt.Fprintf(stdOutTEXTFile, "%s\n", p.Value)
 			}
 		}
 	}
 }
 
-func redirectOutput(w io.Writer, done chan bool) (*os.File, error) {
-	old := os.Stdout
-	r, w2, err := os.Pipe()
-	if err != nil {
-		return nil, err
-	}
-	os.Stdout = w2
-
-	go func() {
-		var buf bytes.Buffer
-		io.Copy(&buf, r)
-		w.Write(buf.Bytes())
-		done <- true
-	}()
-	return old, nil
-}
-
-func main() {
+func ValidateRuntime() {
 	flag.Parse()
 
 	if length == -1 {
@@ -157,19 +144,6 @@ func main() {
 		} else {
 			length = 17
 		}
-	}
-
-	password := Password{
-		Length:    int64(length),
-		Uppercase: !skipUppercase,
-		Lowercase: !skipLowercase,
-		Digits:    !skipDigits,
-		Symbols:   !skipSymbols,
-		Words:     useWords,
-		Entropy:   Entropy{},
-		Sample: &Sample{
-			Limit: int64(passwordCount),
-		},
 	}
 
 	if length < 3 {
@@ -191,11 +165,13 @@ func main() {
 	if skipUppercase && skipLowercase && skipSymbols && skipDigits {
 		log.Fatal("Can't generate password.\n")
 	}
+}
 
-	if generateAverage || minEntropy == "avg" {
-		password.Sample.Average, password.Sample.Min, password.Sample.Max, password.Sample.Recommended = calculateAverageEntropy(passwordCount)
-	}
+func (p *Password) ParseEntropy() {
+	p.Entropy.Parse(p)
+}
 
+func (e *Entropy) Parse(password *Password) {
 	if minEntropy == "avg" {
 		minEntropy = fmt.Sprintf("%.3f", password.Sample.Average)
 	}
@@ -220,56 +196,83 @@ func main() {
 			}
 		}
 	}
+}
 
-	if generateAverage {
-		if showJSON {
-			PrintJSON(password)
-		} else {
-			fmt.Println("Entropy Report: ")
-			fmt.Printf("  Samples: %d\n", password.Sample.Limit)
-			fmt.Printf("  Length: %d\n", password.Length)
-			fmt.Printf("  Uppercase: %v\n", password.Uppercase)
-			fmt.Printf("  Lowercase: %v\n", password.Lowercase)
-			fmt.Printf("  Digits: %v\n", password.Digits)
-			fmt.Printf("  Symbols: %v\n", password.Symbols)
-			fmt.Printf("  Use Words: %v\n", password.Words)
-			fmt.Printf("  Average: %0.3f\n", password.Sample.Average)
-			fmt.Printf("  Minimum: %0.3f\n", password.Sample.Min)
-			fmt.Printf("  Maximum: %0.3f\n", password.Sample.Max)
-			fmt.Printf("  Recommended: %0.3f\n", password.Sample.Recommended)
-		}
-		return
+func main() {
+	ValidateRuntime()
+
+	password := Password{
+		Length:    int64(length),
+		Uppercase: !skipUppercase,
+		Lowercase: !skipLowercase,
+		Digits:    !skipDigits,
+		Symbols:   !skipSymbols,
+		Words:     useWords,
+		Entropy:   Entropy{},
+		Sample: &Sample{
+			Limit: int64(passwordCount),
+		},
 	}
 
-	var passwords = make(map[string]Password, 0)
-	var destination io.Writer
+	if generateAverage || minEntropy == "avg" {
+		password.Sample.Average, password.Sample.Min, password.Sample.Max, password.Sample.Recommended = calculateAverageEntropy(passwordCount)
+	}
+
+	password.ParseEntropy()
+	var err error
+
+	// stdOutTEXT
 	if len(outputFilePath) > 0 {
-		var err error
-		destination, err = os.Create(outputFilePath)
+		stdOutTEXTFile, err = os.Create(outputFilePath)
 		if err != nil {
 			log.Fatalf("cannot write to -o %v due to error %v", outputFilePath, err)
 		}
+		defer stdOutTEXTFile.Close()
 	} else {
-		destination = os.Stdout
+		stdOutTEXTFile = os.Stdout
 	}
 
-	// Create channels to manage spinner output and JSON output
-	spinnerDone := make(chan bool)
-	jsonDone := make(chan bool)
+	// stdOutJSON
+	if showJSON {
+		stdOutJSONFile, err = os.CreateTemp(os.TempDir(),
+			fmt.Sprintf("entpassgen.stdout.%d-%d-%d.%d%d%s.json",
+				time.Now().Local().Year(), time.Now().Local().Month(), time.Now().Local().Day(), // YYYY-MM-DD
+				time.Now().Local().Hour(), time.Now().Local().Minute(), // HHMM
+				time.Now().Local().Format("MST"), // EST
+			))
+		if err != nil {
+			log.Fatalf("cannot write to -o %v due to error %v", "tmp file", err)
+		}
+		defer stdOutJSONFile.Close()
+	}
 
-	// Redirect output for spinner
-	oldStdout, err := redirectOutput(os.Stdout, spinnerDone)
+	// stdOutProgress
+	stdOutProgressFile, err = os.CreateTemp(os.TempDir(),
+		fmt.Sprintf("entpassgen.progress.%d-%d-%d.%d%d%s.log",
+			time.Now().Local().Year(), time.Now().Local().Month(), time.Now().Local().Day(), // YYYY-MM-DD
+			time.Now().Local().Hour(), time.Now().Local().Minute(), // HHMM
+			time.Now().Local().Format("MST"), // EST
+		))
 	if err != nil {
-		log.Fatalf("Failed to redirect stdout: %v", err)
+		log.Fatalf("cannot create progress file: %v", err)
 	}
+	defer stdOutProgressFile.Close()
 
-	// Run the spinner
-	go func() {
-		startTime := time.Now()
-		showSpinner(startTime, spinnerDone)
-	}()
+	// Redirect os.Stdout to stdOutProgressFile
+	oldStdout := os.Stdout
+	os.Stdout = stdOutProgressFile
 
-	cleanedStdout := destination
+	run(&password)
+
+	os.Stdout = oldStdout
+	if showJSON {
+		io.Copy(os.Stdout, stdOutJSONFile)
+	} else {
+		io.Copy(os.Stdout, stdOutTEXTFile)
+	}
+}
+
+func run(password *Password) {
 	for {
 		var newPassword string
 		if useWords {
@@ -287,19 +290,14 @@ func main() {
 		if entropy >= parsedEntropy {
 			password.Value = newPassword
 			password.Entropy.Score = entropy
-			passwords[newPassword] = password
+			passwords[newPassword] = *password
 			if len(passwords) < quantity {
 				continue
 			}
-			DeliverResults(passwords, cleanedStdout)
+			DeliverResults(passwords)
 			break
 		}
 	}
-
-	// Restore the original os.Stdout and signal spinner to stop
-	os.Stdout = oldStdout
-	spinnerDone <- true
-	<-jsonDone
 }
 
 func generateWordPassword(wordCount int) (string, error) {
@@ -507,7 +505,7 @@ func calculateAverageEntropy(count int) (float64, float64, float64, float64) {
 }
 
 func clearLine() {
-	fmt.Printf("\r\033[2K") // Clear the line
+	fmt.Fprintf(stdOutProgressFile, "\r\033[2K") // Clear the line
 }
 
 func showSpinner(startTime time.Time, done chan bool) {
@@ -522,7 +520,7 @@ func showSpinner(startTime time.Time, done chan bool) {
 			return
 		case <-ticker.C:
 			elapsed := time.Since(startTime).Seconds()
-			fmt.Printf("\r\033[1;34mCalculating ... %.1fs %s\033[0m", elapsed, spinner[spinnerIndex])
+			fmt.Fprintf(stdOutProgressFile, "\r\033[1;34mCalculating ... %.1fs %s\033[0m", elapsed, spinner[spinnerIndex])
 			spinnerIndex = (spinnerIndex + 1) % len(spinner)
 		}
 	}

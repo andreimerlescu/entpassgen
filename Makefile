@@ -59,7 +59,7 @@ uninstall:
 prepare:
 	@go mod tidy 1> /dev/null || echo SKIPPED TIDY
 	@go mod download 1> /dev/null || echo SKIPPED DOWNLOAD
-	@/usr/bin/find . -type f -name '*.go' -exec gofmt -w {} \ || echo SKIPPED GOFMT
+	@/usr/bin/find . -type f -name '*.go' -exec gofmt -w {} \; || echo SKIPPED FMT 
 
 .PHONY: $(TARGETS)
 $(TARGETS): 
