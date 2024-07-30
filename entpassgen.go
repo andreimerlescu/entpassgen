@@ -142,8 +142,7 @@ func redirectOutput(w io.Writer, done chan bool) (*os.File, error) {
 	go func() {
 		var buf bytes.Buffer
 		io.Copy(&buf, r)
-		cleanedOutput := cleanOutput(buf.String())
-		w.Write([]byte(cleanedOutput))
+		w.Write(buf.Bytes())
 		done <- true
 	}()
 	return old, nil
@@ -270,7 +269,7 @@ func main() {
 		showSpinner(startTime, spinnerDone)
 	}()
 
-	cleanedStdout := &cleanWriter{writer: destination}
+	cleanedStdout := destination
 	for {
 		var newPassword string
 		if useWords {
@@ -505,25 +504,6 @@ func calculateAverageEntropy(count int) (float64, float64, float64, float64) {
 	avgEntropy := totalEntropy / float64(count)
 	recommendedEntropy := (avgEntropy + maxEntropy) / 2 // > 75% of max
 	return avgEntropy, minEntropy, maxEntropy, recommendedEntropy
-}
-
-// Define a custom writer that wraps an io.Writer
-type cleanWriter struct {
-	writer io.Writer
-}
-
-func (cw *cleanWriter) Write(p []byte) (n int, err error) {
-	input := string(p)
-	cleanedOutput := cleanOutput(input)
-	return cw.writer.Write([]byte(cleanedOutput))
-}
-
-func cleanOutput(input string) string {
-	cleaned := strings.SplitN(input, "[2K", 2)
-	if len(cleaned) > 1 {
-		return cleaned[1]
-	}
-	return input
 }
 
 func clearLine() {
