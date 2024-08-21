@@ -193,7 +193,24 @@ $ entpassgen -k 1000000000 -a -j
 Calculating ... 22.4s -
 ```
 
-Once completed, the line will clear and the results will show: ```
+Once completed, the line will clear and the results will show: 
 
+```json
+{
+  "length": 17,
+  "uppercase": true,
+  "lowercase": true,
+  "digits": true,
+  "symbols": true,
+  "sample": {
+    "limit": 1000,
+    "average": 66.62700662609565,
+    "recommended": 68.05693746367572,
+    "min": 57.977093296928835,
+    "max": 69.48686830125578
+  },
+  "entropy": {}
+}
+```
 
 

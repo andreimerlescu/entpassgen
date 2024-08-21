@@ -18,6 +18,19 @@ func TestGenerateRandomPassword(t *testing.T) {
 	}
 }
 
+func BenchmarkGenerateRandomPassword(b *testing.B) {
+	length := 30
+	for n := 0; n < b.N; n++ {
+		password := generateRandomPassword(length)
+		if len(password) != length {
+			b.Errorf("Expected password length of %d, got %d", length, len(password))
+		}
+		if !containsValidCharacters(password) {
+			b.Errorf("Password contains invalid characters: %s", password)
+		}
+	}
+}
+
 func TestCalculateEntropy(t *testing.T) {
 	password := "dslkhflskhflkshlfkhslkhflkdshlfhsl"
 
@@ -25,6 +38,16 @@ func TestCalculateEntropy(t *testing.T) {
 
 	if entropy < 0 {
 		t.Errorf("Entropy should not be negative, got %f", entropy)
+	}
+}
+
+func BenchmarkCalculateEntropy(b *testing.B) {
+	password := "dslkhflskhflkshlfkhslkhflkdshlfhsl"
+	for i := 0; i < b.N; i++ {
+		entropy := calculateEntropy(password)
+		if entropy < 0 {
+			b.Errorf("Entropy should not be negative, got %f", entropy)
+		}
 	}
 }
 
@@ -36,6 +59,18 @@ func TestParseEntropy(t *testing.T) {
 
 	if entropy != expectedEntropy {
 		t.Errorf("Expected entropy %f, got %f", expectedEntropy, entropy)
+	}
+}
+
+func BenchmarkParseEntropy(b *testing.B) {
+	entropyStr := "9.32"
+	expectedEntropy := 9.32
+
+	for i := 0; i < b.N; i++ {
+		entropy := parseEntropy(entropyStr)
+		if entropy != expectedEntropy {
+			b.Errorf("Expected entropy %f, got %f", expectedEntropy, entropy)
+		}
 	}
 }
 

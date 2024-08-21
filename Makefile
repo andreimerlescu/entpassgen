@@ -5,6 +5,7 @@ OUTPUTS_DIR := outputs
 COVER_OUT := $(OUTPUTS_DIR)/coverage.out
 COVER_JSON := $(OUTPUTS_DIR)/coverage.json
 GO_BUILD := go build -o
+BINARY := /usr/local/bin/$(PROJECT_NAME)
 TARGETS := \
 	darwin/amd64 \
 	darwin/arm64 \
@@ -40,19 +41,19 @@ all: prepare $(TARGETS)
 
 .PHONY: install
 install:
-	@go build -o entpassgen .
-	@chmod +x entpassgen
-	@[ -f /usr/bin/entpassgen ] && sudo rm -rf /usr/bin/entpassgen || echo "Can't remove /usr/bin/entpassgen...NOT FOUND"
-	@sudo mv entpassgen /usr/bin/entpassgen
-	@which entpassgen
+	@go build -o $(PROJECT_NAME) .
+	@chmod +x $(PROJECT_NAME)
+	@[ -f $(BINARY) ] && sudo rm -rf $(BINARY) || echo "Can't remove $(BINARY)...NOT FOUND"
+	@sudo mv entpassgen $(BINARY)
+	@which $(PROJECT_NAME)
 	@entpassgen -h
 
 .PHONY: uninstall
 uninstall:
-	@[ -f /usr/bin/entpassgen ] && \
-		read -t 33 -r -p "Deleting /usr/bin/entpassgen in 33s unless you respond with 'stop'. Enter to do it. Response: " response && \
-		{ [[ "$${response,,}" == "stop" ]] && echo "Skipped removing /usr/bin/entpassgen...USER INTERVENTION"; } || \
-		{ sudo rm -rf /usr/bin/entpassgen && echo "Uninstalled /usr/bin/entpassgen"; } || echo "Skipped removing /usr/bin/entpassgen...NOT FOUND";
+	@[ -f $(BINARY) ] && \
+		read -t 33 -r -p "Deleting $(BINARY) in 33s unless you respond with 'stop'. Enter to do it. Response: " response && \
+		{ [[ "$${response,,}" == "stop" ]] && echo "Skipped removing $(BINARY)...USER INTERVENTION"; } || \
+		{ sudo rm -rf $(BINARY) && echo "Uninstalled $(BINARY)"; } || echo "Skipped removing $(BINARY)...NOT FOUND";
 
 
 .PHONY: prepare
@@ -70,11 +71,11 @@ $(TARGETS):
 clean:
 	@rm -rf $(OUTPUT_DIR)
 	@rm -rf $(OUTPUTS_DIR)
-	@[ -f ./entpassgen ] && rm -rf ./entpassgen || echo "Skipped removing ./entpassgen... NOT FOUND"
-	@[ -f /usr/bin/entpassgen ] && \
-		read -t 33 -r -p "Deleting /usr/bin/entpassgen in 33s unless you respond with 'stop'. Enter to do it. Response: " response && \
-		{ [[ "$${response,,}" == "stop" ]] && echo "Skipped removing /usr/bin/entpassgen...USER INTERVENTION"; } || \
-		{ sudo rm -rf /usr/bin/entpassgen && echo "Uninstalled /usr/bin/entpassgen"; } || echo "Skipped removing /usr/bin/entpassgen...NOT FOUND";
+	@[ -f ./$(PROJECT_NAME) ] && rm -rf ./$(PROJECT_NAME) || echo "Skipped removing ./$(PROJECT_NAME)... NOT FOUND"
+	@[ -f $(BINARY) ] && \
+		read -t 33 -r -p "Deleting $(BINARY) in 33s unless you respond with 'stop'. Enter to do it. Response: " response && \
+		{ [[ "$${response,,}" == "stop" ]] && echo "Skipped removing $(BINARY)...USER INTERVENTION"; } || \
+		{ sudo rm -rf $(BINARY) && echo "Uninstalled $(BINARY)"; } || echo "Skipped removing $(BINARY)...NOT FOUND";
 	
 .PHONY: run
 run: prepare

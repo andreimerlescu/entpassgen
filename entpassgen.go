@@ -51,7 +51,7 @@ var (
 
 func init() {
 	flag.IntVar(&cores, "c", -1, "Concurrency goroutines to use for generating samples over 10K (-1 = max)")
-	flag.IntVar(&length, "l", -1, "Character length in new password")
+	flag.IntVar(&length, "l", 12, "Character length in new password")
 	flag.IntVar(&quantity, "q", 1, "Quantity of passwords to generate (default = 1)")
 	flag.BoolVar(&useWords, "w", false, "Use words (ignores -U -L -S -E -N -s)")
 	flag.BoolVar(&showJSON, "j", false, "JSON formatted output")
