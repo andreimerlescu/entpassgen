@@ -1,5 +1,11 @@
 # Entropy (focused) Password Generator
 
+[![Go Report Card](https://goreportcard.com/badge/github.com/andreimerlescu/entpassgen)](https://goreportcard.com/report/github.com/andreimerlescu/entpassgen)
+
+[Open/Source/Insights @entpassgen](https://deps.dev/go/github.com%2Fandreimerlescu%2Fentpassgen)
+[Go Package @entpassgen](https://pkg.go.dev/github.com/andreimerlescu/entpassgen)
+
+
 This project demonstrates pure Go functionality as it does not use anything but the standard library. The purpose of `entpassgen` is to offer the ability to generate new passwords, but introduce the concept of entropy to the equation when generating new passwords. The package relies on `crypto/rand` to generate random numbers and uses `rune`, which makes it compatible with multiple languages, countries and use-cases. 
 
 ## Getting Started
