@@ -127,6 +127,18 @@ $ entpassgen -j | jq '.'
 }
 ```
 
+### Generate Bogus Hebrew Words
+
+```zsh
+$ entpassgen -L -U -N -S -s "אבגדהוזחטיכלמנסעפצקרשת" -l 12 -q 5
+גקגתתעשנפכט
+שבגדעהתלנמ
+כדעפמכלכחת
+כגטששתחטצת
+טכלננמנסא
+
+```
+
 ### Generate Random Number (9 digits long)
 
 ```zsh
