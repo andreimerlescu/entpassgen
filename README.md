@@ -1,6 +1,11 @@
 # Entropy (focused) Password Generator
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/andreimerlescu/entpassgen)](https://goreportcard.com/report/github.com/andreimerlescu/entpassgen)
+![GitHub Release](https://img.shields.io/github/v/release/andreimerlescu/entpassgen)
+![GitHub License](https://img.shields.io/github/license/andreimerlescu/entpassgen)
+![GitHub branch status](https://img.shields.io/github/checks-status/andreimerlescu/entpassgen/master)
+![GitHub top language](https://img.shields.io/github/languages/top/andreimerlescu/entpassgen)
+
 
 [Open/Source/Insights @entpassgen](https://deps.dev/go/github.com%2Fandreimerlescu%2Fentpassgen)
 [Go Package @entpassgen](https://pkg.go.dev/github.com/andreimerlescu/entpassgen)
