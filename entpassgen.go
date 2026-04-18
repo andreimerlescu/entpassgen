@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"math/big"
 	"os"
 	"runtime"
 	"strings"
@@ -38,15 +39,13 @@ var (
 	symbols                  string
 	excludeSymbols           string
 	minEntropy               string
-	acceptableUppercase      string              = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-	acceptableLowercase      string              = "abcdefghijklmnopqrstuvwxyz"
-	acceptableDigits         string              = "0123456789"
-	acceptableWordSeparators string              = "!@#$%^&*()_+1234567890-=,.></?;:[]|"
-	acceptableSymbols        string              = "!@#$%^&*()_+=-[]\\{}|;':,./<>?"
-	passwords                map[string]Password = map[string]Password{}
-	stdOutJSONFile           *os.File
+	acceptableUppercase      string = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	acceptableLowercase      string = "abcdefghijklmnopqrstuvwxyz"
+	acceptableDigits         string = "0123456789"
+	acceptableWordSeparators string = "!@#$%^&*()_+1234567890-=,.></?;:[]|"
+	acceptableSymbols        string = "!@#$%^&*()_+=-[]\\{}|;':,./<>?"
 	stdOutTEXTFile           *os.File
-	stdOutProgressFile       *os.File
+	stdOutJSONFile           *os.File
 )
 
 func init() {
@@ -68,6 +67,10 @@ func init() {
 	flag.StringVar(&wordSeparators, "W", acceptableWordSeparators, "Separate words with these possible characters")
 	flag.StringVar(&excludeSymbols, "E", "", "Define exclude symbols in new password")
 }
+
+// ============================================================
+// Types
+// ============================================================
 
 type Password struct {
 	Length    int64   `json:"length,omitempty"`
@@ -93,47 +96,95 @@ type Sample struct {
 	Max         float64 `json:"max,omitempty"`
 }
 
-func PrintJSON(in interface{}, w io.Writer) {
-	jsonBytes, jsonErr := json.Marshal(in)
-	if jsonErr != nil {
-		log.Fatalf("Can't marshal Entropy object. Error: %v", jsonErr)
-	} else {
-		fmt.Fprintf(w, "%s", string(jsonBytes))
+// PasswordStore replaces the map[string]Password pattern.
+// Using the password value as a map key caused silent deduplication,
+// heap-lingering strings, and made collision detection invisible to the caller.
+// PasswordStore makes uniqueness enforcement explicit and auditable.
+type PasswordStore struct {
+	mu    sync.Mutex
+	seen  map[string]struct{}
+	items []Password
+}
+
+func NewPasswordStore() *PasswordStore {
+	return &PasswordStore{
+		seen:  make(map[string]struct{}),
+		items: make([]Password, 0),
 	}
+}
+
+// Add attempts to add a password to the store.
+// Returns true if added, false if the value was already present.
+// The caller is responsible for retrying on false.
+func (ps *PasswordStore) Add(p Password) bool {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if _, exists := ps.seen[p.Value]; exists {
+		return false
+	}
+	ps.seen[p.Value] = struct{}{}
+	ps.items = append(ps.items, p)
+	return true
+}
+
+// Len returns the number of unique passwords stored.
+func (ps *PasswordStore) Len() int {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return len(ps.items)
+}
+
+// Items returns a copy of the stored passwords in insertion order.
+func (ps *PasswordStore) Items() []Password {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	out := make([]Password, len(ps.items))
+	copy(out, ps.items)
+	return out
+}
+
+// ============================================================
+// Output
+// ============================================================
+
+func PrintJSON(in interface{}, w io.Writer) {
+	jsonBytes, err := json.Marshal(in)
+	if err != nil {
+		log.Fatalf("failed to marshal to JSON: %v", err)
+	}
+	fmt.Fprintf(w, "%s", string(jsonBytes))
 }
 
 func AsJSON(in interface{}) string {
-	jsonBytes, jsonErr := json.Marshal(in)
-	if jsonErr != nil {
-		log.Fatalf("Can't marshal Entropy object. Error: %v", jsonErr)
-	} else {
-		return string(jsonBytes)
+	jsonBytes, err := json.Marshal(in)
+	if err != nil {
+		log.Fatalf("failed to marshal to JSON: %v", err)
 	}
-	return ""
+	return string(jsonBytes)
 }
 
-func DeliverResults(passwords map[string]Password) {
-
-	var results []Password
-	for _, p := range passwords {
-		results = append(results, p)
-	}
-	if len(results) == 1 {
+func DeliverResults(store *PasswordStore, w io.Writer) {
+	items := store.Items()
+	if len(items) == 1 {
 		if showJSON {
-			PrintJSON(results[0], stdOutJSONFile)
+			PrintJSON(items[0], w)
 		} else {
-			fmt.Fprintf(stdOutTEXTFile, results[0].Value)
+			fmt.Fprint(w, items[0].Value)
 		}
 	} else {
 		if showJSON {
-			PrintJSON(results, stdOutJSONFile)
+			PrintJSON(items, w)
 		} else {
-			for _, p := range results {
-				fmt.Fprintf(stdOutTEXTFile, "%s\n", p.Value)
+			for _, p := range items {
+				fmt.Fprintf(w, "%s\n", p.Value)
 			}
 		}
 	}
 }
+
+// ============================================================
+// Validation
+// ============================================================
 
 func ValidateRuntime() {
 	flag.Parse()
@@ -147,25 +198,30 @@ func ValidateRuntime() {
 	}
 
 	if length < 3 {
-		log.Fatalf("Invalid length -l %d.\n", length)
+		log.Fatalf("invalid length -l %d\n", length)
 	}
 
 	if quantity < 0 {
-		log.Fatalf("Invalid quantity -q %d\n", quantity)
+		log.Fatalf("invalid quantity -q %d\n", quantity)
 	}
 
+	// 434: machine elves — they help with the entropy
 	if quantity >= 434 {
-		log.Fatalf("Invalid quantity (max 434) -q %d\n", quantity)
+		log.Fatalf("invalid quantity (max 434) -q %d\n", quantity)
 	}
 
 	if passwordCount > 1_000_000_001 {
-		log.Fatalf("Invalid limit (max 1B) -k %d\n", passwordCount)
+		log.Fatalf("invalid limit (max 1B) -k %d\n", passwordCount)
 	}
 
 	if skipUppercase && skipLowercase && skipSymbols && skipDigits {
-		log.Fatal("Can't generate password.\n")
+		log.Fatal("can't generate password: all character classes disabled\n")
 	}
 }
+
+// ============================================================
+// Entropy
+// ============================================================
 
 func (p *Password) ParseEntropy() {
 	p.Entropy.Parse(p)
@@ -175,28 +231,303 @@ func (e *Entropy) Parse(password *Password) {
 	if minEntropy == "avg" {
 		minEntropy = fmt.Sprintf("%.3f", password.Sample.Average)
 	}
-	// allows -e n8 for 98% of password.Sample.Max entropy from sample
 	for _, letter := range "nes" {
 		for i := 0; i < 10; i++ {
 			if minEntropy == fmt.Sprintf("%s%d", string(letter), i) {
 				tens := ""
-				if string(letter) == "n" {
+				switch string(letter) {
+				case "n":
 					tens = "9"
-				} else if string(letter) == "e" {
+				case "e":
 					tens = "8"
-				} else if string(letter) == "s" {
+				case "s":
 					tens = "7"
 				}
 				digits := fmt.Sprintf("%s%d.0", tens, i)
 				var value float64
-				_, err := fmt.Sscanf(digits, "%f", &value)
-				if err != nil {
-					log.Fatalf("Invalid entropy value: %s\n", digits)
+				if _, err := fmt.Sscanf(digits, "%f", &value); err != nil {
+					log.Fatalf("invalid entropy value: %s\n", digits)
 				}
 			}
 		}
 	}
 }
+
+func calculateEntropy(password string) float64 {
+	length := len(password)
+	if length == 0 {
+		return 0
+	}
+	frequency := make(map[rune]float64)
+	for _, char := range password {
+		frequency[char]++
+	}
+	var entropy float64
+	for _, count := range frequency {
+		p := count / float64(length)
+		entropy += p * math.Log2(p)
+	}
+	return -entropy * float64(length)
+}
+
+func parseEntropy(entropy string) float64 {
+	if entropy == "avg" {
+		return 0.0
+	}
+	var value float64
+	if _, err := fmt.Sscanf(entropy, "%f", &value); err != nil {
+		log.Fatalf("invalid entropy value: %s\n", entropy)
+	}
+	return value
+}
+
+// ============================================================
+// Random
+// ============================================================
+
+// randomInt returns a cryptographically secure random integer in [0, max).
+// Uses math/big.Int to eliminate modulo bias — the approach recommended
+// by security practitioners over the single-byte % max pattern.
+func randomInt(max int) int {
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(max)))
+	if err != nil {
+		log.Fatalf("randomInt: crypto/rand failed: %v", err)
+	}
+	return int(n.Int64())
+}
+
+// ============================================================
+// Password generation
+// ============================================================
+
+func generateRandomPassword(length int) string {
+	charset := ""
+	if !skipUppercase {
+		charset += acceptableUppercase
+	}
+	if !skipLowercase {
+		charset += acceptableLowercase
+	}
+	if !skipDigits {
+		charset += acceptableDigits
+	}
+	if !skipSymbols {
+		charset += symbols
+	}
+	if excludeSymbols != "" {
+		for _, c := range excludeSymbols {
+			charset = strings.ReplaceAll(charset, string(c), "")
+		}
+	}
+	result := make([]byte, length)
+	total := len(charset)
+	for i := range result {
+		result[i] = charset[randomInt(total)]
+	}
+	return string(result)
+}
+
+var acceptableWords []string
+
+func loadWords() error {
+	if len(acceptableWords) > 50 {
+		return nil
+	}
+	words := strings.Split(string(englishBytes), "\n")
+	for _, word := range words {
+		word = strings.TrimSpace(word)
+		if len(word) > 5 {
+			acceptableWords = append(acceptableWords, word)
+		}
+	}
+	if len(acceptableWords) == 0 {
+		return errors.New("no words imported into memory")
+	}
+	return nil
+}
+
+func generateWordPassword(wordCount int) (string, error) {
+	if err := loadWords(); err != nil {
+		return "", err
+	}
+	totalWords := len(acceptableWords)
+	words := make([]string, wordCount)
+	for i := range words {
+		words[i] = acceptableWords[randomInt(totalWords)]
+	}
+
+	seps := acceptableWordSeparators
+	if excludeSymbols != "" {
+		seps = strings.ReplaceAll(seps, excludeSymbols, "")
+	}
+
+	var sb strings.Builder
+	total := len(seps)
+	for i, word := range words {
+		sb.WriteString(word)
+		if i < len(words)-1 {
+			sb.WriteByte(seps[randomInt(total)])
+		}
+	}
+	return sb.String(), nil
+}
+
+// ============================================================
+// Concurrency
+// ============================================================
+
+// intparts splits i into chunks of size p.
+func intparts(i, p int) []int {
+	var parts []int
+	for i > 0 {
+		if i > p {
+			parts = append(parts, p)
+			i -= p
+		} else {
+			parts = append(parts, i)
+			i = 0
+		}
+	}
+	return parts
+}
+
+func calculateAverageEntropy(count int) (float64, float64, float64, float64) {
+	var totalEntropy float64
+	minEnt := math.MaxFloat64
+	var maxEnt float64
+	var mu sync.Mutex
+
+	coresToUse := cores
+	if coresToUse == -1 {
+		coresToUse = runtime.GOMAXPROCS(0)
+	}
+	if coresToUse < 1 {
+		coresToUse = 1
+	}
+
+	chunks := intparts(count, count/coresToUse)
+	startTime := time.Now()
+	done := make(chan bool, 1)
+
+	go func() {
+		for range time.Tick(1 * time.Second) {
+			if time.Since(startTime) > 11*time.Second {
+				go showSpinner(startTime, done)
+				return
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for _, chunk := range chunks {
+		chunk := chunk
+		wg.Add(1)
+		go func(chunk int) {
+			defer wg.Done()
+			var localTotal, localMin, localMax float64
+			localMin = math.MaxFloat64
+			for i := 0; i < chunk; i++ {
+				var pw string
+				if useWords {
+					var err error
+					pw, err = generateWordPassword(length)
+					if err != nil {
+						log.Printf("generateWordPassword error: %v", err)
+						continue
+					}
+				} else {
+					pw = generateRandomPassword(length)
+				}
+				e := calculateEntropy(pw)
+				localTotal += e
+				if e < localMin {
+					localMin = e
+				}
+				if e > localMax {
+					localMax = e
+				}
+			}
+			mu.Lock()
+			totalEntropy += localTotal
+			if localMin < minEnt {
+				minEnt = localMin
+			}
+			if localMax > maxEnt {
+				maxEnt = localMax
+			}
+			mu.Unlock()
+		}(chunk)
+	}
+	wg.Wait() // outside the loop — all goroutines run concurrently
+
+	done <- true
+	clearLine()
+
+	avg := totalEntropy / float64(count)
+	recommended := (avg + maxEnt) / 2
+	return avg, minEnt, maxEnt, recommended
+}
+
+// ============================================================
+// Spinner — writes to stderr so stdout stays clean for output
+// ============================================================
+
+func clearLine() {
+	fmt.Fprint(os.Stderr, "\r\033[2K")
+}
+
+func showSpinner(startTime time.Time, done chan bool) {
+	spinner := []string{"|", "/", "-", "\\"}
+	i := 0
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			clearLine()
+			return
+		case <-ticker.C:
+			elapsed := time.Since(startTime).Seconds()
+			fmt.Fprintf(os.Stderr, "\r\033[1;34mCalculating ... %.1fs %s\033[0m",
+				elapsed, spinner[i%len(spinner)])
+			i++
+		}
+	}
+}
+
+// ============================================================
+// Run
+// ============================================================
+
+func run(password *Password, store *PasswordStore) {
+	for {
+		var pw string
+		if useWords {
+			var err error
+			pw, err = generateWordPassword(length)
+			if err != nil {
+				log.Printf("generateWordPassword error: %v", err)
+				continue
+			}
+		} else {
+			pw = generateRandomPassword(length)
+		}
+
+		e := calculateEntropy(pw)
+		if e >= parseEntropy(minEntropy) {
+			p := *password
+			p.Value = pw
+			p.Entropy.Score = e
+			if store.Add(p) && store.Len() >= quantity {
+				break
+			}
+		}
+	}
+}
+
+// ============================================================
+// Main
+// ============================================================
 
 func main() {
 	ValidateRuntime()
@@ -215,313 +546,65 @@ func main() {
 	}
 
 	if generateAverage || minEntropy == "avg" {
-		password.Sample.Average, password.Sample.Min, password.Sample.Max, password.Sample.Recommended = calculateAverageEntropy(passwordCount)
+		password.Sample.Average,
+			password.Sample.Min,
+			password.Sample.Max,
+			password.Sample.Recommended = calculateAverageEntropy(passwordCount)
 	}
 
 	password.ParseEntropy()
-	var err error
 
-	// stdOutTEXT
+	// Determine output writer
+	var err error
 	if len(outputFilePath) > 0 {
-		stdOutTEXTFile, err = os.Create(outputFilePath)
+		stdOutTEXTFile, err = os.OpenFile(
+			outputFilePath,
+			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
+			0600,
+		)
 		if err != nil {
-			log.Fatalf("cannot write to -o %v due to error %v", outputFilePath, err)
+			log.Fatalf("cannot open output file %q: %v", outputFilePath, err)
 		}
 		defer stdOutTEXTFile.Close()
 	} else {
 		stdOutTEXTFile = os.Stdout
 	}
 
-	// stdOutJSON
+	// JSON output: write to a restricted temp file, copy to stdout after run
 	if showJSON {
-		stdOutJSONFile, err = os.CreateTemp(os.TempDir(),
-			fmt.Sprintf("entpassgen.stdout.%d-%d-%d.%d%d%s.json",
-				time.Now().Local().Year(), time.Now().Local().Month(), time.Now().Local().Day(), // YYYY-MM-DD
-				time.Now().Local().Hour(), time.Now().Local().Minute(), // HHMM
-				time.Now().Local().Format("MST"), // EST
-			))
+		tmpName := fmt.Sprintf("entpassgen.%d.json", time.Now().UnixNano())
+		tmpPath := fmt.Sprintf("%s/%s", os.TempDir(), tmpName)
+		stdOutJSONFile, err = os.OpenFile(
+			tmpPath,
+			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
+			0600, // restricted before any password data is written
+		)
 		if err != nil {
-			log.Fatalf("cannot write to -o %v due to error %v", "tmp file", err)
+			log.Fatalf("cannot create JSON temp file: %v", err)
 		}
-		defer stdOutJSONFile.Close()
+		defer func() {
+			stdOutJSONFile.Close()
+			os.Remove(tmpPath)
+		}()
 	}
 
-	// stdOutProgress
-	stdOutProgressFile, err = os.CreateTemp(os.TempDir(),
-		fmt.Sprintf("entpassgen.progress.%d-%d-%d.%d%d%s.log",
-			time.Now().Local().Year(), time.Now().Local().Month(), time.Now().Local().Day(), // YYYY-MM-DD
-			time.Now().Local().Hour(), time.Now().Local().Minute(), // HHMM
-			time.Now().Local().Format("MST"), // EST
-		))
-	if err != nil {
-		log.Fatalf("cannot create progress file: %v", err)
-	}
-	defer stdOutProgressFile.Close()
+	store := NewPasswordStore()
+	run(&password, store)
 
-	// Redirect os.Stdout to stdOutProgressFile
-	oldStdout := os.Stdout
-	os.Stdout = stdOutProgressFile
-
-	run(&password)
-
-	os.Stdout = oldStdout
+	// Deliver results
+	out := io.Writer(stdOutTEXTFile)
 	if showJSON {
-		io.Copy(os.Stdout, stdOutJSONFile)
-	} else {
-		io.Copy(os.Stdout, stdOutTEXTFile)
+		out = stdOutJSONFile
 	}
-}
+	DeliverResults(store, out)
 
-func run(password *Password) {
-	for {
-		var newPassword string
-		if useWords {
-			var wordErr error
-			newPassword, wordErr = generateWordPassword(length)
-			if wordErr != nil {
-				log.Printf("wordErr = %v", wordErr)
-				continue
-			}
-		} else {
-			newPassword = generateRandomPassword(length)
+	// If JSON was written to temp, copy to final destination now
+	if showJSON {
+		if _, err := stdOutJSONFile.Seek(0, io.SeekStart); err != nil {
+			log.Fatalf("cannot seek JSON temp file: %v", err)
 		}
-		entropy := calculateEntropy(newPassword)
-		parsedEntropy := parseEntropy(minEntropy)
-		if entropy >= parsedEntropy {
-			password.Value = newPassword
-			password.Entropy.Score = entropy
-			passwords[newPassword] = *password
-			if len(passwords) < quantity {
-				continue
-			}
-			DeliverResults(passwords)
-			break
-		}
-	}
-}
-
-func generateWordPassword(wordCount int) (string, error) {
-	loadErr := loadWords()
-	if loadErr != nil {
-		return "NO_PASSWORD", loadErr
-	}
-	totalWords := len(acceptableWords)
-	words := make([]string, wordCount)
-	for i := 0; i < wordCount; i++ {
-		words[i] = acceptableWords[randomInt(totalWords)]
-	}
-
-	if excludeSymbols != "" {
-		acceptableWordSeparators = strings.ReplaceAll(acceptableWordSeparators, excludeSymbols, "")
-	}
-
-	var sb = strings.Builder{}
-	cnt := 0
-	total := len(acceptableWordSeparators)
-	for _, word := range words {
-		cnt++
-		separator := acceptableWordSeparators[randomInt(total)]
-		if cnt == total {
-			sb.WriteString(word)
-		} else {
-			sb.WriteString(word + string(separator))
-		}
-	}
-	return sb.String(), nil
-}
-
-func generateRandomPassword(length int) string {
-	charset := ""
-	if !skipUppercase {
-		charset += acceptableUppercase
-	}
-	if !skipLowercase {
-		charset += acceptableLowercase
-	}
-	if !skipDigits {
-		charset += acceptableDigits
-	}
-	if !skipSymbols {
-		charset += symbols
-	}
-
-	if excludeSymbols != "" {
-		for _, c := range excludeSymbols {
-			charset = strings.ReplaceAll(charset, string(c), "")
-		}
-	}
-
-	result := make([]byte, length)
-	total := len(charset)
-	for i := range result {
-		randomChar := charset[randomInt(total)]
-		result[i] = randomChar
-	}
-	return string(result)
-}
-
-var acceptableWords []string
-
-func loadWords() error {
-	if len(acceptableWords) > 50 {
-		return nil
-	}
-	wordsStr := string(englishBytes)
-	words := strings.Split(wordsStr, "\n") // Correct splitting on new lines
-	for _, word := range words {
-		word = strings.TrimSpace(word) // Remove any leading/trailing whitespace
-		if len(word) > 5 {             // Adjust the length condition as needed
-			acceptableWords = append(acceptableWords, word)
-		}
-	}
-	if len(acceptableWords) == 0 {
-		return errors.New("no words imported into memory")
-	}
-	return nil
-}
-
-func randomInt(max int) int {
-	b := make([]byte, 1)
-	rand.Read(b)
-	return int(b[0]) % max
-}
-
-func calculateEntropy(password string) float64 {
-	length := len(password)
-	frequency := make(map[rune]float64)
-	for _, char := range password {
-		frequency[char]++
-	}
-
-	var entropy float64
-	for _, count := range frequency {
-		p := count / float64(length)
-		entropy += p * math.Log2(p)
-	}
-	return -entropy * float64(length)
-}
-
-func parseEntropy(entropy string) float64 {
-	var value float64
-	if entropy == "avg" {
-		value = 0.0
-	} else {
-		_, err := fmt.Sscanf(entropy, "%f", &value)
-		if err != nil {
-			log.Fatalf("Invalid entropy value: %s\n", entropy)
-		}
-	}
-	return value
-}
-
-// intparts splits the integer i into parts of size p
-func intparts(i, p int) []int {
-	var parts []int
-	for i > 0 {
-		if i > p {
-			parts = append(parts, p)
-			i -= p
-		} else {
-			parts = append(parts, i)
-			i = 0
-		}
-	}
-	return parts
-}
-
-func calculateAverageEntropy(count int) (float64, float64, float64, float64) {
-	var totalEntropy, minEntropy, maxEntropy float64
-	minEntropy = math.MaxFloat64
-	var mu sync.Mutex
-
-	coresToUse := cores
-	if coresToUse == -1 {
-		coresToUse = runtime.GOMAXPROCS(0)
-	}
-
-	chunks := intparts(count, count/coresToUse)
-	startTime := time.Now()
-	done := make(chan bool)
-
-	go func() {
-		for range time.Tick(1 * time.Second) {
-			if time.Since(startTime) > 11*time.Second {
-				go showSpinner(startTime, done)
-				return
-			}
-		}
-	}()
-
-	var wg sync.WaitGroup
-
-	for _, chunk := range chunks {
-		chunk := chunk
-		wg.Add(1)
-		go func(chunk int) {
-			defer wg.Done()
-			var localTotalEntropy, localMinEntropy, localMaxEntropy float64
-			localMinEntropy = math.MaxFloat64
-			for i := 0; i < chunk; i++ {
-				var password string
-				if useWords {
-					var wordErr error
-					password, wordErr = generateWordPassword(length)
-					if wordErr != nil {
-						log.Printf("wordErr(%d) = %v", i, wordErr)
-						continue
-					}
-				} else {
-					password = generateRandomPassword(length)
-				}
-
-				entropy := calculateEntropy(password)
-				localTotalEntropy += entropy
-				if entropy < localMinEntropy {
-					localMinEntropy = entropy
-				}
-				if entropy > localMaxEntropy {
-					localMaxEntropy = entropy
-				}
-			}
-			mu.Lock()
-			totalEntropy += localTotalEntropy
-			if localMinEntropy < minEntropy {
-				minEntropy = localMinEntropy
-			}
-			if localMaxEntropy > maxEntropy {
-				maxEntropy = localMaxEntropy
-			}
-			mu.Unlock()
-		}(chunk)
-		wg.Wait()
-	}
-
-	done <- true
-	clearLine()
-
-	avgEntropy := totalEntropy / float64(count)
-	recommendedEntropy := (avgEntropy + maxEntropy) / 2 // > 75% of max
-	return avgEntropy, minEntropy, maxEntropy, recommendedEntropy
-}
-
-func clearLine() {
-	fmt.Fprintf(stdOutProgressFile, "\r\033[2K") // Clear the line
-}
-
-func showSpinner(startTime time.Time, done chan bool) {
-	spinner := []string{"|", "/", "-", "\\"}
-	spinnerIndex := 0
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-done:
-			clearLine()
-			return
-		case <-ticker.C:
-			elapsed := time.Since(startTime).Seconds()
-			fmt.Fprintf(stdOutProgressFile, "\r\033[1;34mCalculating ... %.1fs %s\033[0m", elapsed, spinner[spinnerIndex])
-			spinnerIndex = (spinnerIndex + 1) % len(spinner)
+		if _, err := io.Copy(stdOutTEXTFile, stdOutJSONFile); err != nil {
+			log.Fatalf("cannot copy JSON output: %v", err)
 		}
 	}
 }
