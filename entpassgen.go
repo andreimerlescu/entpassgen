@@ -12,6 +12,7 @@ import (
 	"math"
 	"math/big"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -35,15 +36,14 @@ var (
 	outputFilePath           string
 	wordSeparators           string
 	showJSON                 bool
-	showTEXT                 bool
-	symbols                  string
-	excludeSymbols           string
-	minEntropy               string
 	acceptableUppercase      string = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	acceptableLowercase      string = "abcdefghijklmnopqrstuvwxyz"
 	acceptableDigits         string = "0123456789"
 	acceptableWordSeparators string = "!@#$%^&*()_+1234567890-=,.></?;:[]|"
 	acceptableSymbols        string = "!@#$%^&*()_+=-[]\\{}|;':,./<>?"
+	symbols                  string
+	excludeSymbols           string
+	minEntropy               string
 	stdOutTEXTFile           *os.File
 	stdOutJSONFile           *os.File
 )
@@ -54,7 +54,6 @@ func init() {
 	flag.IntVar(&quantity, "q", 1, "Quantity of passwords to generate (default = 1)")
 	flag.BoolVar(&useWords, "w", false, "Use words (ignores -U -L -S -E -N -s)")
 	flag.BoolVar(&showJSON, "j", false, "JSON formatted output")
-	flag.BoolVar(&showTEXT, "t", true, "TEXT formatted output (default)")
 	flag.StringVar(&symbols, "s", acceptableSymbols, "Define acceptable symbols in new password")
 	flag.BoolVar(&skipDigits, "N", false, "Do not use numbers in new password")
 	flag.BoolVar(&skipSymbols, "S", false, "Do not use symbols in new password")
@@ -98,8 +97,9 @@ type Sample struct {
 
 // PasswordStore replaces the map[string]Password pattern.
 // Using the password value as a map key caused silent deduplication,
-// heap-lingering strings, and made collision detection invisible to the caller.
-// PasswordStore makes uniqueness enforcement explicit and auditable.
+// heap-lingering strings, and made collision detection invisible to
+// the caller. PasswordStore makes uniqueness enforcement explicit and
+// auditable — the caller sees false on collision and retries.
 type PasswordStore struct {
 	mu    sync.Mutex
 	seen  map[string]struct{}
@@ -163,6 +163,9 @@ func AsJSON(in interface{}) string {
 	return string(jsonBytes)
 }
 
+// DeliverResults writes passwords from store to w.
+// Accepts an io.Writer so output can be redirected in tests
+// without touching global file handles.
 func DeliverResults(store *PasswordStore, w io.Writer) {
 	items := store.Items()
 	if len(items) == 1 {
@@ -230,7 +233,12 @@ func (p *Password) ParseEntropy() {
 func (e *Entropy) Parse(password *Password) {
 	if minEntropy == "avg" {
 		minEntropy = fmt.Sprintf("%.3f", password.Sample.Average)
+		return
 	}
+
+	// Shorthand entropy selectors: n8=98, e8=88, s8=78 etc.
+	// The letter sets the tens digit prefix, the number sets the units.
+	// e.g. "n8" → "98.0", "e3" → "83.0", "s5" → "75.0"
 	for _, letter := range "nes" {
 		for i := 0; i < 10; i++ {
 			if minEntropy == fmt.Sprintf("%s%d", string(letter), i) {
@@ -246,8 +254,12 @@ func (e *Entropy) Parse(password *Password) {
 				digits := fmt.Sprintf("%s%d.0", tens, i)
 				var value float64
 				if _, err := fmt.Sscanf(digits, "%f", &value); err != nil {
-					log.Fatalf("invalid entropy value: %s\n", digits)
+					log.Fatalf("invalid entropy shorthand: %s → %s: %v\n", minEntropy, digits, err)
 				}
+				// Assign the resolved numeric string so parseEntropy
+				// receives a valid float rather than the shorthand token.
+				minEntropy = digits
+				return
 			}
 		}
 	}
@@ -276,7 +288,10 @@ func parseEntropy(entropy string) float64 {
 	}
 	var value float64
 	if _, err := fmt.Sscanf(entropy, "%f", &value); err != nil {
-		log.Fatalf("invalid entropy value: %s\n", entropy)
+		log.Fatalf("invalid entropy value %q: %v\n", entropy, err)
+	}
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		log.Fatalf("invalid entropy value %q: must be a finite number\n", entropy)
 	}
 	return value
 }
@@ -286,9 +301,12 @@ func parseEntropy(entropy string) float64 {
 // ============================================================
 
 // randomInt returns a cryptographically secure random integer in [0, max).
-// Uses math/big.Int to eliminate modulo bias — the approach recommended
-// by security practitioners over the single-byte % max pattern.
+// Uses crypto/rand.Int with math/big to eliminate modulo bias — the
+// approach recommended by security practitioners over single-byte % max.
 func randomInt(max int) int {
+	if max <= 0 {
+		log.Fatalf("randomInt: max must be greater than zero, got %d", max)
+	}
 	n, err := rand.Int(rand.Reader, big.NewInt(int64(max)))
 	if err != nil {
 		log.Fatalf("randomInt: crypto/rand failed: %v", err)
@@ -318,6 +336,9 @@ func generateRandomPassword(length int) string {
 		for _, c := range excludeSymbols {
 			charset = strings.ReplaceAll(charset, string(c), "")
 		}
+	}
+	if len(charset) == 0 {
+		log.Fatal("generateRandomPassword: charset is empty after applying exclusions — enable at least one character class")
 	}
 	result := make([]byte, length)
 	total := len(charset)
@@ -350,23 +371,33 @@ func generateWordPassword(wordCount int) (string, error) {
 	if err := loadWords(); err != nil {
 		return "", err
 	}
+
+	// Use the -W flag value so the user-supplied separator set is respected.
+	// Falls back to acceptableWordSeparators only if wordSeparators is empty.
+	seps := wordSeparators
+	if seps == "" {
+		seps = acceptableWordSeparators
+	}
+	if excludeSymbols != "" {
+		for _, c := range excludeSymbols {
+			seps = strings.ReplaceAll(seps, string(c), "")
+		}
+	}
+	if len(seps) == 0 {
+		return "", errors.New("generateWordPassword: separator set is empty after applying exclusions")
+	}
+
 	totalWords := len(acceptableWords)
 	words := make([]string, wordCount)
 	for i := range words {
 		words[i] = acceptableWords[randomInt(totalWords)]
 	}
 
-	seps := acceptableWordSeparators
-	if excludeSymbols != "" {
-		seps = strings.ReplaceAll(seps, excludeSymbols, "")
-	}
-
 	var sb strings.Builder
-	total := len(seps)
 	for i, word := range words {
 		sb.WriteString(word)
 		if i < len(words)-1 {
-			sb.WriteByte(seps[randomInt(total)])
+			sb.WriteByte(seps[randomInt(len(seps))])
 		}
 	}
 	return sb.String(), nil
@@ -377,7 +408,12 @@ func generateWordPassword(wordCount int) (string, error) {
 // ============================================================
 
 // intparts splits i into chunks of size p.
+// Returns []int{i} if p <= 0 to prevent infinite loops and
+// division-by-zero in calculateAverageEntropy.
 func intparts(i, p int) []int {
+	if p <= 0 {
+		return []int{i}
+	}
 	var parts []int
 	for i > 0 {
 		if i > p {
@@ -409,11 +445,21 @@ func calculateAverageEntropy(count int) (float64, float64, float64, float64) {
 	startTime := time.Now()
 	done := make(chan bool, 1)
 
+	// Monitor elapsed time and start the spinner only for long runs.
+	// Uses time.NewTicker so the ticker can be stopped and the goroutine
+	// exits cleanly — avoiding the time.Tick leak on short runs.
 	go func() {
-		for range time.Tick(1 * time.Second) {
-			if time.Since(startTime) > 11*time.Second {
-				go showSpinner(startTime, done)
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
 				return
+			case <-ticker.C:
+				if time.Since(startTime) > 11*time.Second {
+					go showSpinner(startTime, done)
+					return
+				}
 			}
 		}
 	}()
@@ -469,7 +515,8 @@ func calculateAverageEntropy(count int) (float64, float64, float64, float64) {
 }
 
 // ============================================================
-// Spinner — writes to stderr so stdout stays clean for output
+// Spinner — writes to stderr so stdout stays clean for password output.
+// Piping works correctly: entpassgen -a | grep value won't capture noise.
 // ============================================================
 
 func clearLine() {
@@ -554,7 +601,7 @@ func main() {
 
 	password.ParseEntropy()
 
-	// Determine output writer
+	// Determine text output destination.
 	var err error
 	if len(outputFilePath) > 0 {
 		stdOutTEXTFile, err = os.OpenFile(
@@ -570,14 +617,15 @@ func main() {
 		stdOutTEXTFile = os.Stdout
 	}
 
-	// JSON output: write to a restricted temp file, copy to stdout after run
+	// JSON temp file: permissions set to 0600 before any password
+	// data is written. filepath.Join used for cross-platform safety.
 	if showJSON {
 		tmpName := fmt.Sprintf("entpassgen.%d.json", time.Now().UnixNano())
-		tmpPath := fmt.Sprintf("%s/%s", os.TempDir(), tmpName)
+		tmpPath := filepath.Join(os.TempDir(), tmpName)
 		stdOutJSONFile, err = os.OpenFile(
 			tmpPath,
-			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
-			0600, // restricted before any password data is written
+			os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL,
+			0600,
 		)
 		if err != nil {
 			log.Fatalf("cannot create JSON temp file: %v", err)
@@ -591,14 +639,14 @@ func main() {
 	store := NewPasswordStore()
 	run(&password, store)
 
-	// Deliver results
+	// Write results to the appropriate destination.
 	out := io.Writer(stdOutTEXTFile)
 	if showJSON {
 		out = stdOutJSONFile
 	}
 	DeliverResults(store, out)
 
-	// If JSON was written to temp, copy to final destination now
+	// Copy JSON temp file to final destination.
 	if showJSON {
 		if _, err := stdOutJSONFile.Seek(0, io.SeekStart); err != nil {
 			log.Fatalf("cannot seek JSON temp file: %v", err)
