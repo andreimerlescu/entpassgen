@@ -39,7 +39,7 @@ cd entpassgen
 make install
 
 # Download a pre-built binary (Linux amd64)
-curl -o ./entpassgen -s https://github.com/andreimerlescu/entpassgen/releases/download/v1.0.0/entpassgen.linux-amd64
+curl -o ./entpassgen -s https://github.com/andreimerlescu/entpassgen/releases/download/v1.1.0/entpassgen.linux-amd64
 chmod +x entpassgen
 mv entpassgen ~/bin/entpassgen
 entpassgen -h
@@ -55,7 +55,7 @@ entpassgen.exe -h
 # Download pre-built binary (run as Administrator)
 New-Item -ItemType Directory -Force -Path C:\bin
 setx /M PATH "%PATH%;C:\bin"
-Invoke-WebRequest "https://github.com/andreimerlescu/entpassgen/releases/download/v1.0.0/entpassgen.windows-amd64.exe" -OutFile C:\bin\entpassgen.exe
+Invoke-WebRequest "https://github.com/andreimerlescu/entpassgen/releases/download/v1.1.0/entpassgen.windows-amd64.exe" -OutFile C:\bin\entpassgen.exe
 entpassgen.exe -h
 ```
 
