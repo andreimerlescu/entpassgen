@@ -3,19 +3,21 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"testing"
 	"unicode"
 )
 
 // ============================================================
-// helpers
+// Test helpers
 // ============================================================
 
-// resetGlobals restores all package-level flags to their default
-// values. Call defer resetGlobals() at the top of any test that
-// mutates global state so subsequent tests start clean.
+// resetGlobals restores every package-level flag and derived variable to its
+// default value. Defer this at the top of any test that mutates global state
+// to prevent cross-test pollution.
 func resetGlobals() {
 	skipUppercase = false
 	skipLowercase = false
@@ -26,11 +28,31 @@ func resetGlobals() {
 	wordSeparators = acceptableWordSeparators
 	useWords = false
 	showJSON = false
-	minEntropy = "avg"
+	minEntropy = "0"
 	length = 17
 	cores = -1
 	quantity = 1
 	acceptableWords = nil
+	wordsOnce = sync.Once{}
+	wordsErr = nil
+}
+
+// ============================================================
+// Version
+// ============================================================
+
+func TestVersion_NonEmpty(t *testing.T) {
+	v := Version()
+	if v == "" {
+		t.Error("Version() returned empty string")
+	}
+}
+
+func TestVersion_StartsWithV(t *testing.T) {
+	v := Version()
+	if !strings.HasPrefix(v, "v") {
+		t.Errorf("Version() = %q, expected prefix 'v'", v)
+	}
 }
 
 // ============================================================
@@ -48,23 +70,22 @@ func TestRandomInt_InRange(t *testing.T) {
 
 func TestRandomInt_MaxOne(t *testing.T) {
 	for i := 0; i < 1_000; i++ {
-		v := randomInt(1)
-		if v != 0 {
+		if v := randomInt(1); v != 0 {
 			t.Fatalf("randomInt(1) = %d, want 0", v)
 		}
 	}
 }
 
 func TestRandomInt_Distribution(t *testing.T) {
-	// After the math/big fix, distribution across buckets must be
-	// statistically uniform. Tolerance: ±10% of expected frequency.
-	const max = 16
-	const samples = 200_000
-	counts := make([]int, max)
+	const (
+		buckets = 16
+		samples = 200_000
+	)
+	counts := make([]int, buckets)
 	for i := 0; i < samples; i++ {
-		counts[randomInt(max)]++
+		counts[randomInt(buckets)]++
 	}
-	expected := float64(samples) / float64(max)
+	expected := float64(samples) / float64(buckets)
 	tolerance := expected * 0.10
 	for i, c := range counts {
 		if diff := math.Abs(float64(c) - expected); diff > tolerance {
@@ -102,11 +123,11 @@ func TestIntparts_UnevenDivision(t *testing.T) {
 		sum += p
 	}
 	if sum != 10 {
-		t.Errorf("parts sum = %d, want 10; parts = %v", sum, parts)
+		t.Errorf("sum = %d, want 10; parts = %v", sum, parts)
 	}
 }
 
-func TestIntparts_SmallerThanPart(t *testing.T) {
+func TestIntparts_SmallerThanPartSize(t *testing.T) {
 	parts := intparts(3, 100)
 	if len(parts) != 1 || parts[0] != 3 {
 		t.Errorf("expected [3], got %v", parts)
@@ -114,28 +135,26 @@ func TestIntparts_SmallerThanPart(t *testing.T) {
 }
 
 func TestIntparts_Zero(t *testing.T) {
-	parts := intparts(0, 10)
-	if len(parts) != 0 {
+	if parts := intparts(0, 10); len(parts) != 0 {
 		t.Errorf("expected empty slice, got %v", parts)
 	}
 }
 
-// Guard added in Copilot review: p<=0 must not infinite-loop.
 func TestIntparts_ZeroPartSize(t *testing.T) {
 	parts := intparts(10, 0)
 	if len(parts) != 1 || parts[0] != 10 {
-		t.Errorf("intparts(10, 0) = %v, want [10]", parts)
+		t.Errorf("intparts(10,0) = %v, want [10]", parts)
 	}
 }
 
 func TestIntparts_NegativePartSize(t *testing.T) {
 	parts := intparts(10, -5)
 	if len(parts) != 1 || parts[0] != 10 {
-		t.Errorf("intparts(10, -5) = %v, want [10]", parts)
+		t.Errorf("intparts(10,-5) = %v, want [10]", parts)
 	}
 }
 
-func TestIntparts_SumAlwaysEqualsI(t *testing.T) {
+func TestIntparts_SumAlwaysEqualsTotal(t *testing.T) {
 	cases := [][2]int{
 		{1, 1}, {7, 3}, {100, 7}, {99, 10}, {1000, 33},
 	}
@@ -177,7 +196,7 @@ func TestCalculateEntropy_LongerDiverseIsHigher(t *testing.T) {
 	short := calculateEntropy("aB3!")
 	long := calculateEntropy("aB3!xQ9#mZ2@kL5^nP7$")
 	if long <= short {
-		t.Errorf("longer diverse password should have higher entropy: short=%f long=%f", short, long)
+		t.Errorf("longer diverse password should score higher: short=%f long=%f", short, long)
 	}
 }
 
@@ -191,6 +210,18 @@ func TestCalculateEntropy_NeverNegative(t *testing.T) {
 		if e := calculateEntropy(tc); e < 0 {
 			t.Errorf("negative entropy for %q: %f", tc, e)
 		}
+	}
+}
+
+func TestCalculateEntropy_ScoreIsNotSearchSpaceEntropy(t *testing.T) {
+	// Two passwords of identical length drawn from the same charset have equal
+	// search-space entropy (log2(charsetSize^length)), but their Shannon-derived
+	// scores differ based on character repetition. This test asserts that the
+	// function intentionally measures distribution, not search-space strength.
+	uniform := calculateEntropy("aaaaaaaaaaaaaaaa!") // low distribution score
+	diverse := calculateEntropy("aB3!xQ9#mZ2@kL5^n") // high distribution score
+	if uniform >= diverse {
+		t.Errorf("uniform-heavy string should score lower than diverse one: uniform=%f diverse=%f", uniform, diverse)
 	}
 }
 
@@ -231,15 +262,15 @@ func TestParseEntropy_Numeric(t *testing.T) {
 	}
 }
 
-func TestParseEntropy_AvgReturnsZero(t *testing.T) {
-	if got := parseEntropy("avg"); got != 0.0 {
-		t.Errorf("parseEntropy(\"avg\") = %f, want 0.0", got)
+func TestParseEntropy_ZeroAndAvgReturnZero(t *testing.T) {
+	for _, s := range []string{"avg", "0"} {
+		if got := parseEntropy(s); got != 0.0 {
+			t.Errorf("parseEntropy(%q) = %f, want 0.0", s, got)
+		}
 	}
 }
 
 func TestParseEntropy_NegativeValue(t *testing.T) {
-	// Negative entropy thresholds are technically parseable floats.
-	// parseEntropy accepts them — all passwords will pass a negative threshold.
 	got := parseEntropy("-1.0")
 	if got != -1.0 {
 		t.Errorf("parseEntropy(\"-1.0\") = %f, want -1.0", got)
@@ -248,26 +279,25 @@ func TestParseEntropy_NegativeValue(t *testing.T) {
 
 func FuzzParseEntropy(f *testing.F) {
 	f.Add("avg")
+	f.Add("0")
 	f.Add("9.32")
 	f.Add("0.0")
 	f.Add("100")
 	f.Add("-1.0")
 	f.Fuzz(func(t *testing.T, input string) {
-		// Only exercise paths that do not call log.Fatalf.
-		// log.Fatalf exits the process — uncatchable in fuzz targets.
-		if input == "avg" {
+		if input == "avg" || input == "0" {
 			got := parseEntropy(input)
 			if got != 0.0 {
-				t.Errorf("parseEntropy(\"avg\") = %f, want 0.0", got)
+				t.Errorf("parseEntropy(%q) = %f, want 0.0", input, got)
 			}
 			return
 		}
 		var v float64
 		if _, err := fmt.Sscanf(input, "%f", &v); err != nil {
-			return // would fatal — skip
+			return // would log.Fatalf — skip
 		}
 		if math.IsNaN(v) || math.IsInf(v, 0) {
-			return // would fatal — skip
+			return // would log.Fatalf — skip
 		}
 		got := parseEntropy(input)
 		if math.IsNaN(got) || math.IsInf(got, 0) {
@@ -277,7 +307,7 @@ func FuzzParseEntropy(f *testing.F) {
 }
 
 // ============================================================
-// Entropy.Parse / Password.ParseEntropy
+// Entropy.parse / Password.ParseEntropy
 // ============================================================
 
 func TestEntropyParse_AvgSetsMinEntropy(t *testing.T) {
@@ -289,9 +319,8 @@ func TestEntropyParse_AvgSetsMinEntropy(t *testing.T) {
 	}
 	p.ParseEntropy()
 	if minEntropy == "avg" {
-		t.Error("minEntropy should have been resolved from avg to a numeric string")
+		t.Error("minEntropy should have been resolved from 'avg' to a numeric string")
 	}
-	// Resolved value should parse as the average
 	got := parseEntropy(minEntropy)
 	if math.Abs(got-55.5) > 0.001 {
 		t.Errorf("resolved minEntropy = %f, want ~55.5", got)
@@ -301,10 +330,7 @@ func TestEntropyParse_AvgSetsMinEntropy(t *testing.T) {
 func TestEntropyParse_NumericPassthrough(t *testing.T) {
 	defer resetGlobals()
 	minEntropy = "50.0"
-	p := Password{
-		Sample:  &Sample{Average: 55.5, Max: 69.0},
-		Entropy: Entropy{},
-	}
+	p := Password{Sample: &Sample{Average: 55.5, Max: 69.0}, Entropy: Entropy{}}
 	p.ParseEntropy()
 	if minEntropy != "50.0" {
 		t.Errorf("minEntropy should remain 50.0, got %s", minEntropy)
@@ -313,37 +339,56 @@ func TestEntropyParse_NumericPassthrough(t *testing.T) {
 
 func TestEntropyParse_ShorthandN(t *testing.T) {
 	defer resetGlobals()
-	// "n8" → "98.0"
 	minEntropy = "n8"
 	p := Password{Sample: &Sample{Average: 55.0, Max: 69.0}, Entropy: Entropy{}}
 	p.ParseEntropy()
 	got := parseEntropy(minEntropy)
 	if math.Abs(got-98.0) > 1e-9 {
-		t.Errorf("shorthand n8 → expected 98.0, got %f (minEntropy=%s)", got, minEntropy)
+		t.Errorf("n8 → expected 98.0, got %f (minEntropy=%s)", got, minEntropy)
 	}
 }
 
 func TestEntropyParse_ShorthandE(t *testing.T) {
 	defer resetGlobals()
-	// "e3" → "83.0"
 	minEntropy = "e3"
 	p := Password{Sample: &Sample{Average: 55.0, Max: 69.0}, Entropy: Entropy{}}
 	p.ParseEntropy()
 	got := parseEntropy(minEntropy)
 	if math.Abs(got-83.0) > 1e-9 {
-		t.Errorf("shorthand e3 → expected 83.0, got %f (minEntropy=%s)", got, minEntropy)
+		t.Errorf("e3 → expected 83.0, got %f (minEntropy=%s)", got, minEntropy)
 	}
 }
 
 func TestEntropyParse_ShorthandS(t *testing.T) {
 	defer resetGlobals()
-	// "s5" → "75.0"
 	minEntropy = "s5"
 	p := Password{Sample: &Sample{Average: 55.0, Max: 69.0}, Entropy: Entropy{}}
 	p.ParseEntropy()
 	got := parseEntropy(minEntropy)
 	if math.Abs(got-75.0) > 1e-9 {
-		t.Errorf("shorthand s5 → expected 75.0, got %f (minEntropy=%s)", got, minEntropy)
+		t.Errorf("s5 → expected 75.0, got %f (minEntropy=%s)", got, minEntropy)
+	}
+}
+
+func TestEntropyParse_ShorthandAllLettersAndDigits(t *testing.T) {
+	defer resetGlobals()
+	cases := []struct {
+		shorthand string
+		expected  float64
+	}{
+		{"n0", 90.0}, {"n5", 95.0}, {"n9", 99.0},
+		{"e0", 80.0}, {"e4", 84.0}, {"e9", 89.0},
+		{"s0", 70.0}, {"s2", 72.0}, {"s9", 79.0},
+	}
+	for _, tc := range cases {
+		minEntropy = tc.shorthand
+		p := Password{Sample: &Sample{Average: 55.0, Max: 69.0}, Entropy: Entropy{}}
+		p.ParseEntropy()
+		got := parseEntropy(minEntropy)
+		if math.Abs(got-tc.expected) > 1e-9 {
+			t.Errorf("%s → expected %.1f, got %f", tc.shorthand, tc.expected, got)
+		}
+		minEntropy = "0" // reset between cases inside loop
 	}
 }
 
@@ -354,10 +399,29 @@ func TestEntropyParse_ShorthandS(t *testing.T) {
 func TestGenerateRandomPassword_Length(t *testing.T) {
 	defer resetGlobals()
 	for _, l := range []int{3, 8, 12, 17, 32, 64} {
-		pw := generateRandomPassword(l)
+		pw, err := generateRandomPassword(l)
+		if err != nil {
+			t.Fatalf("length %d: unexpected error: %v", l, err)
+		}
 		if len(pw) != l {
 			t.Errorf("length %d: got password of length %d", l, len(pw))
 		}
+	}
+}
+
+func TestGenerateRandomPassword_ZeroLength(t *testing.T) {
+	defer resetGlobals()
+	_, err := generateRandomPassword(0)
+	if err == nil {
+		t.Error("expected error for length 0, got nil")
+	}
+}
+
+func TestGenerateRandomPassword_NegativeLength(t *testing.T) {
+	defer resetGlobals()
+	_, err := generateRandomPassword(-1)
+	if err == nil {
+		t.Error("expected error for negative length, got nil")
 	}
 }
 
@@ -365,7 +429,7 @@ func TestGenerateRandomPassword_AllCharClasses(t *testing.T) {
 	defer resetGlobals()
 	found := struct{ upper, lower, digit, symbol bool }{}
 	for i := 0; i < 200; i++ {
-		pw := generateRandomPassword(32)
+		pw, _ := generateRandomPassword(32)
 		for _, c := range pw {
 			switch {
 			case unicode.IsUpper(c):
@@ -382,17 +446,17 @@ func TestGenerateRandomPassword_AllCharClasses(t *testing.T) {
 			return
 		}
 	}
-	t.Errorf("after 200 attempts not all char classes found: %+v", found)
+	t.Errorf("after 200 attempts, not all char classes seen: %+v", found)
 }
 
 func TestGenerateRandomPassword_SkipUppercase(t *testing.T) {
 	defer resetGlobals()
 	skipUppercase = true
 	for i := 0; i < 500; i++ {
-		pw := generateRandomPassword(20)
+		pw, _ := generateRandomPassword(20)
 		for _, c := range pw {
 			if unicode.IsUpper(c) {
-				t.Fatalf("found uppercase in password with skipUppercase=true: %s", pw)
+				t.Fatalf("uppercase found with skipUppercase=true: %s", pw)
 			}
 		}
 	}
@@ -402,10 +466,10 @@ func TestGenerateRandomPassword_SkipLowercase(t *testing.T) {
 	defer resetGlobals()
 	skipLowercase = true
 	for i := 0; i < 500; i++ {
-		pw := generateRandomPassword(20)
+		pw, _ := generateRandomPassword(20)
 		for _, c := range pw {
 			if unicode.IsLower(c) {
-				t.Fatalf("found lowercase with skipLowercase=true: %s", pw)
+				t.Fatalf("lowercase found with skipLowercase=true: %s", pw)
 			}
 		}
 	}
@@ -415,10 +479,10 @@ func TestGenerateRandomPassword_SkipDigits(t *testing.T) {
 	defer resetGlobals()
 	skipDigits = true
 	for i := 0; i < 500; i++ {
-		pw := generateRandomPassword(20)
+		pw, _ := generateRandomPassword(20)
 		for _, c := range pw {
 			if unicode.IsDigit(c) {
-				t.Fatalf("found digit with skipDigits=true: %s", pw)
+				t.Fatalf("digit found with skipDigits=true: %s", pw)
 			}
 		}
 	}
@@ -429,10 +493,10 @@ func TestGenerateRandomPassword_SkipSymbols(t *testing.T) {
 	skipSymbols = true
 	valid := acceptableUppercase + acceptableLowercase + acceptableDigits
 	for i := 0; i < 500; i++ {
-		pw := generateRandomPassword(20)
+		pw, _ := generateRandomPassword(20)
 		for _, c := range pw {
 			if !strings.ContainsRune(valid, c) {
-				t.Fatalf("found symbol with skipSymbols=true: %s", pw)
+				t.Fatalf("symbol found with skipSymbols=true: %s", pw)
 			}
 		}
 	}
@@ -442,25 +506,41 @@ func TestGenerateRandomPassword_ExcludeSymbols(t *testing.T) {
 	defer resetGlobals()
 	excludeSymbols = "!@#"
 	for i := 0; i < 500; i++ {
-		if pw := generateRandomPassword(30); strings.ContainsAny(pw, "!@#") {
-			t.Fatalf("found excluded symbol in: %s", pw)
+		pw, err := generateRandomPassword(30)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if strings.ContainsAny(pw, "!@#") {
+			t.Fatalf("excluded symbol found in: %s", pw)
 		}
 	}
 }
 
-func TestGenerateRandomPassword_CustomSymbols(t *testing.T) {
+func TestGenerateRandomPassword_CustomSymbolSet(t *testing.T) {
 	defer resetGlobals()
 	skipUppercase = true
 	skipLowercase = true
 	skipDigits = true
 	symbols = "abc"
 	for i := 0; i < 200; i++ {
-		pw := generateRandomPassword(20)
+		pw, _ := generateRandomPassword(20)
 		for _, c := range pw {
 			if !strings.ContainsRune("abc", c) {
-				t.Fatalf("found char outside custom symbol set in: %s", pw)
+				t.Fatalf("char outside custom symbol set in: %s", pw)
 			}
 		}
+	}
+}
+
+func TestGenerateRandomPassword_EmptyCharsetReturnsError(t *testing.T) {
+	defer resetGlobals()
+	skipUppercase = true
+	skipLowercase = true
+	skipDigits = true
+	skipSymbols = true
+	_, err := generateRandomPassword(10)
+	if err == nil {
+		t.Error("expected error for empty charset, got nil")
 	}
 }
 
@@ -470,11 +550,15 @@ func FuzzGenerateRandomPassword(f *testing.F) {
 	f.Add(17)
 	f.Add(64)
 	f.Fuzz(func(t *testing.T, l int) {
-		if l < 3 || l > 10_000 {
+		if l < 1 || l > 10_000 {
 			return
 		}
 		resetGlobals()
-		pw := generateRandomPassword(l)
+		pw, err := generateRandomPassword(l)
+		if err != nil {
+			t.Errorf("generateRandomPassword(%d) returned unexpected error: %v", l, err)
+			return
+		}
 		if len(pw) != l {
 			t.Errorf("generateRandomPassword(%d) returned length %d", l, len(pw))
 		}
@@ -484,14 +568,14 @@ func FuzzGenerateRandomPassword(f *testing.F) {
 func BenchmarkGenerateRandomPassword_Short(b *testing.B) {
 	b.Cleanup(resetGlobals)
 	for i := 0; i < b.N; i++ {
-		generateRandomPassword(12)
+		generateRandomPassword(12) //nolint:errcheck
 	}
 }
 
 func BenchmarkGenerateRandomPassword_Long(b *testing.B) {
 	b.Cleanup(resetGlobals)
 	for i := 0; i < b.N; i++ {
-		generateRandomPassword(64)
+		generateRandomPassword(64) //nolint:errcheck
 	}
 }
 
@@ -501,8 +585,7 @@ func BenchmarkGenerateRandomPassword_Long(b *testing.B) {
 
 func TestLoadWords_LoadsWords(t *testing.T) {
 	defer resetGlobals()
-	err := loadWords()
-	if err != nil {
+	if err := loadWords(); err != nil {
 		t.Fatalf("loadWords() error: %v", err)
 	}
 	if len(acceptableWords) < 50 {
@@ -516,7 +599,7 @@ func TestLoadWords_Idempotent(t *testing.T) {
 	count := len(acceptableWords)
 	_ = loadWords()
 	if len(acceptableWords) != count {
-		t.Errorf("loadWords() not idempotent: first=%d second=%d", count, len(acceptableWords))
+		t.Errorf("loadWords not idempotent: first=%d second=%d", count, len(acceptableWords))
 	}
 }
 
@@ -527,6 +610,31 @@ func TestLoadWords_MinWordLength(t *testing.T) {
 		if len(w) <= 5 {
 			t.Errorf("word %q is too short (must be >5 chars)", w)
 		}
+	}
+}
+
+func TestLoadWords_ConcurrentSafe(t *testing.T) {
+	defer resetGlobals()
+	var wg sync.WaitGroup
+	errs := make([]error, 20)
+	for i := 0; i < 20; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = loadWords()
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d: loadWords() error: %v", i, err)
+		}
+	}
+	// Word count must be consistent regardless of which goroutine populated it.
+	count := len(acceptableWords)
+	if count < 50 {
+		t.Errorf("expected ≥50 words after concurrent load, got %d", count)
 	}
 }
 
@@ -545,23 +653,19 @@ func TestGenerateWordPassword_ReturnsNonEmpty(t *testing.T) {
 
 func TestGenerateWordPassword_RespectsWordSeparators(t *testing.T) {
 	defer resetGlobals()
-	// Restrict separators to a single known character so we can assert on it.
 	wordSeparators = "-"
 	pw, err := generateWordPassword(3)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// A 3-word password should contain exactly 2 separators.
-	count := strings.Count(pw, "-")
-	if count != 2 {
+	// A 3-word password has exactly 2 separators.
+	if count := strings.Count(pw, "-"); count != 2 {
 		t.Errorf("expected 2 '-' separators in %q, got %d", pw, count)
 	}
 }
 
 func TestGenerateWordPassword_EmptySepsAfterExclusion(t *testing.T) {
 	defer resetGlobals()
-	// Set seps to a single char then exclude it — must return an error,
-	// not pass 0 to randomInt.
 	wordSeparators = "!"
 	excludeSymbols = "!"
 	_, err := generateWordPassword(3)
@@ -570,7 +674,7 @@ func TestGenerateWordPassword_EmptySepsAfterExclusion(t *testing.T) {
 	}
 }
 
-func TestGenerateWordPassword_ExcludeSymbolsHonoured(t *testing.T) {
+func TestGenerateWordPassword_ExcludedSeparatorAbsent(t *testing.T) {
 	defer resetGlobals()
 	excludeSymbols = "!"
 	for i := 0; i < 200; i++ {
@@ -579,7 +683,7 @@ func TestGenerateWordPassword_ExcludeSymbolsHonoured(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if strings.Contains(pw, "!") {
-			t.Fatalf("found excluded separator '!' in: %s", pw)
+			t.Fatalf("excluded separator '!' found in: %s", pw)
 		}
 	}
 }
@@ -589,7 +693,7 @@ func BenchmarkGenerateWordPassword(b *testing.B) {
 	_ = loadWords()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = generateWordPassword(5)
+		generateWordPassword(5) //nolint:errcheck
 	}
 }
 
@@ -619,6 +723,17 @@ func TestCalculateAverageEntropy_Invariants(t *testing.T) {
 	}
 	if recommended > max {
 		t.Errorf("recommended (%f) should be ≤ max (%f)", recommended, max)
+	}
+}
+
+func TestCalculateAverageEntropy_WordMode(t *testing.T) {
+	defer resetGlobals()
+	useWords = true
+	length = 3
+	cores = 2
+	avg, min, max, _ := calculateAverageEntropy(200)
+	if avg <= 0 || min <= 0 || max < avg {
+		t.Errorf("word mode invariants failed: avg=%f min=%f max=%f", avg, min, max)
 	}
 }
 
@@ -652,18 +767,6 @@ func TestPrintJSON_WritesValidJSON(t *testing.T) {
 	}
 	if out.Value != p.Value {
 		t.Errorf("round-trip value: got %q want %q", out.Value, p.Value)
-	}
-}
-
-func TestAsJSON_WritesValidJSON(t *testing.T) {
-	p := Password{Length: 12, Value: "abc123!@#XYZ"}
-	s := AsJSON(p)
-	if s == "" {
-		t.Fatal("AsJSON returned empty string")
-	}
-	var out Password
-	if err := json.Unmarshal([]byte(s), &out); err != nil {
-		t.Errorf("AsJSON output is not valid JSON: %v", err)
 	}
 }
 
@@ -705,32 +808,23 @@ func TestAsJSON_RoundTrip(t *testing.T) {
 
 func TestDeliverResults_SinglePassword_Text(t *testing.T) {
 	defer resetGlobals()
-	showJSON = false
-
 	store := NewPasswordStore()
 	store.Add(Password{Value: "SingleResult1!"})
-
 	var buf bytes.Buffer
 	DeliverResults(store, &buf)
-
-	got := buf.String()
-	if got != "SingleResult1!" {
-		t.Errorf("DeliverResults single text: got %q, want %q", got, "SingleResult1!")
+	if got := buf.String(); got != "SingleResult1!" {
+		t.Errorf("got %q, want %q", got, "SingleResult1!")
 	}
 }
 
 func TestDeliverResults_MultiplePasswords_Text(t *testing.T) {
 	defer resetGlobals()
-	showJSON = false
-
 	store := NewPasswordStore()
 	store.Add(Password{Value: "alpha1!"})
 	store.Add(Password{Value: "bravo2@"})
 	store.Add(Password{Value: "charlie3#"})
-
 	var buf bytes.Buffer
 	DeliverResults(store, &buf)
-
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
 	if len(lines) != 3 {
 		t.Errorf("expected 3 lines, got %d: %v", len(lines), lines)
@@ -740,16 +834,13 @@ func TestDeliverResults_MultiplePasswords_Text(t *testing.T) {
 func TestDeliverResults_SinglePassword_JSON(t *testing.T) {
 	defer resetGlobals()
 	showJSON = true
-
 	store := NewPasswordStore()
 	store.Add(Password{Value: "JsonResult1!", Length: 12})
-
 	var buf bytes.Buffer
 	DeliverResults(store, &buf)
-
 	var out Password
 	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
-		t.Fatalf("single JSON output is not valid JSON: %v\noutput: %s", err, buf.String())
+		t.Fatalf("JSON output invalid: %v\noutput: %s", err, buf.String())
 	}
 	if out.Value != "JsonResult1!" {
 		t.Errorf("JSON value: got %q want %q", out.Value, "JsonResult1!")
@@ -759,17 +850,14 @@ func TestDeliverResults_SinglePassword_JSON(t *testing.T) {
 func TestDeliverResults_MultiplePasswords_JSON(t *testing.T) {
 	defer resetGlobals()
 	showJSON = true
-
 	store := NewPasswordStore()
 	store.Add(Password{Value: "first1!"})
 	store.Add(Password{Value: "second2@"})
-
 	var buf bytes.Buffer
 	DeliverResults(store, &buf)
-
 	var out []Password
 	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
-		t.Fatalf("multi JSON output is not valid JSON: %v\noutput: %s", err, buf.String())
+		t.Fatalf("JSON array output invalid: %v\noutput: %s", err, buf.String())
 	}
 	if len(out) != 2 {
 		t.Errorf("expected 2 passwords in JSON array, got %d", len(out))
@@ -778,17 +866,13 @@ func TestDeliverResults_MultiplePasswords_JSON(t *testing.T) {
 
 func TestDeliverResults_PreservesInsertionOrder(t *testing.T) {
 	defer resetGlobals()
-	showJSON = false
-
 	store := NewPasswordStore()
 	expected := []string{"first1!", "second2@", "third3#"}
 	for _, v := range expected {
 		store.Add(Password{Value: v})
 	}
-
 	var buf bytes.Buffer
 	DeliverResults(store, &buf)
-
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
 	for i, line := range lines {
 		if line != expected[i] {
@@ -831,7 +915,6 @@ func TestPasswordStore_ItemsReturnsCopy(t *testing.T) {
 	store.Add(Password{Value: "immutable!"})
 	items := store.Items()
 	items[0].Value = "mutated"
-	// Internal state must not be affected
 	if store.Items()[0].Value == "mutated" {
 		t.Error("Items() returned a reference to internal slice, not a copy")
 	}
@@ -846,6 +929,101 @@ func TestPasswordStore_PreservesOrder(t *testing.T) {
 	for i, p := range store.Items() {
 		if p.Value != vals[i] {
 			t.Errorf("position %d: got %q, want %q", i, p.Value, vals[i])
+		}
+	}
+}
+
+func TestPasswordStore_ConcurrentAdd(t *testing.T) {
+	store := NewPasswordStore()
+	var wg sync.WaitGroup
+	// Each goroutine adds a unique password — all should succeed.
+	for i := 0; i < 100; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			store.Add(Password{Value: fmt.Sprintf("pw-%d-unique!", i)})
+		}()
+	}
+	wg.Wait()
+	if store.Len() != 100 {
+		t.Errorf("expected 100 unique passwords, got %d", store.Len())
+	}
+}
+
+func TestPasswordStore_ConcurrentDuplicate(t *testing.T) {
+	store := NewPasswordStore()
+	var wg sync.WaitGroup
+	// All goroutines try to add the same password — exactly one should succeed.
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			store.Add(Password{Value: "same-password!"})
+		}()
+	}
+	wg.Wait()
+	if store.Len() != 1 {
+		t.Errorf("expected 1 unique password after concurrent duplicate adds, got %d", store.Len())
+	}
+}
+
+// ============================================================
+// run()
+// ============================================================
+
+func TestRun_GeneratesRequestedQuantity(t *testing.T) {
+	defer resetGlobals()
+	quantity = 5
+	minEntropy = "0"
+	password := Password{
+		Length: int64(length), Uppercase: true, Lowercase: true,
+		Digits: true, Symbols: true, Entropy: Entropy{},
+		Sample: &Sample{Limit: 0},
+	}
+	store := NewPasswordStore()
+	run(&password, store)
+	if store.Len() != 5 {
+		t.Errorf("expected 5 passwords, got %d", store.Len())
+	}
+}
+
+func TestRun_AllPasswordsUnique(t *testing.T) {
+	defer resetGlobals()
+	quantity = 10
+	minEntropy = "0"
+	password := Password{
+		Length: int64(length), Uppercase: true, Lowercase: true,
+		Digits: true, Symbols: true, Entropy: Entropy{},
+		Sample: &Sample{Limit: 0},
+	}
+	store := NewPasswordStore()
+	run(&password, store)
+	items := store.Items()
+	seen := make(map[string]bool)
+	for _, p := range items {
+		if seen[p.Value] {
+			t.Errorf("duplicate password in output: %s", p.Value)
+		}
+		seen[p.Value] = true
+	}
+}
+
+func TestRun_EntropyThresholdRespected(t *testing.T) {
+	defer resetGlobals()
+	quantity = 5
+	minEntropy = "10.0" // easily achievable at length 17
+	password := Password{
+		Length: int64(length), Uppercase: true, Lowercase: true,
+		Digits: true, Symbols: true, Entropy: Entropy{},
+		Sample: &Sample{Limit: 0},
+	}
+	store := NewPasswordStore()
+	run(&password, store)
+	threshold := parseEntropy(minEntropy)
+	for _, p := range store.Items() {
+		if p.Entropy.Score < threshold {
+			t.Errorf("password %q has entropy %f below threshold %f", p.Value, p.Entropy.Score, threshold)
 		}
 	}
 }
