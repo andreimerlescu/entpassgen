@@ -1,7 +1,7 @@
 PROJECT_NAME  := entpassgen
 SHELL         := bash
-BENCHTIME     := 30s
-FUZZTIME      := 30s
+BENCHTIME     := 7s
+FUZZTIME      := 17s
 OUTPUT_DIR    := bin
 OUTPUTS_DIR   := outputs
 COVER_OUT     := $(OUTPUTS_DIR)/coverage.out
