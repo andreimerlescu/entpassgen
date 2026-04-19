@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Build · Test · Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.5"
+          cache: true
+
+      - name: Verify & Tidy
+        run: |
+          go mod verify
+          go mod tidy
+
+      - name: Format
+        run: |
+          UNFORMATTED=$(gofmt -l .)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "Unformatted files:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Test
+        run: go test -v -race -count=1 -coverprofile=coverage.out -covermode=atomic -timeout=120s ./...
+
+      - name: Coverage
+        run: |
+          go tool cover -func=coverage.out
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
+          echo "Total coverage: ${COVERAGE}%"
+          if (( $(echo "$COVERAGE < 72.0" | bc -l) )); then
+            echo "Coverage ${COVERAGE}% is below minimum threshold of 72%"
+            exit 1
+          fi
+
+      - name: Benchmark
+        run: go test -run='^$' -bench=. -benchtime=3s -timeout=300s ./...
+
+      - name: Fuzz
+        run: |
+          go test -run='^$' -fuzz=FuzzParseEntropy -fuzztime=20s ./...
+          go test -run='^$' -fuzz=FuzzGenerateRandomPassword -fuzztime=20s ./...
