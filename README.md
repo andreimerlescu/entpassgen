@@ -1,5 +1,7 @@
 # Entropy (focused) Password Generator
 
+![entpassgen Created by Andrei Merlescu](/entpassgen.jpg)
+
 [![Go Report Card](https://goreportcard.com/badge/github.com/andreimerlescu/entpassgen)](https://goreportcard.com/report/github.com/andreimerlescu/entpassgen)
 ![GitHub Release](https://img.shields.io/github/v/release/andreimerlescu/entpassgen)
 ![GitHub License](https://img.shields.io/github/license/andreimerlescu/entpassgen)
