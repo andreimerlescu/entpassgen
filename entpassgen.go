@@ -259,17 +259,9 @@ const maxQuantity = 434
 // higher than any password of the chosen length and charset can achieve.
 const maxRetries = 10_000_000
 
-// ValidateRuntime parses CLI flags and enforces preconditions.
-// It calls log.Fatalf (which exits) on any invalid combination.
-func ValidateRuntime() {
-	flag.Parse()
-
-	if showVersion {
-		fmt.Printf("entpassgen %s\n", Version())
-		os.Exit(0)
-	}
-
-	// Auto-select sensible default lengths.
+// validateConfig checks all preconditions on the current global flag values.
+// Separated from ValidateRuntime so tests can call it without flag.Parse().
+func validateConfig() error {
 	if length == -1 {
 		if useWords {
 			length = 5
@@ -277,25 +269,35 @@ func ValidateRuntime() {
 			length = 17
 		}
 	}
-
 	if length < 3 {
-		log.Fatalf("invalid length -l %d (minimum 3)\n", length)
+		return fmt.Errorf("invalid length -l %d (minimum 3)\n", length)
 	}
-
 	if quantity <= 0 {
-		log.Fatalf("invalid quantity -q %d (must be > 0)\n", quantity)
+		return fmt.Errorf("invalid quantity -q %d (must be > 0)\n", quantity)
 	}
-
 	if quantity > maxQuantity {
-		log.Fatalf("invalid quantity -q %d (maximum %d)\n", quantity, maxQuantity)
+		return fmt.Errorf("invalid quantity -q %d (maximum %d)\n", quantity, maxQuantity)
 	}
-
 	if passwordCount > 1_000_000_001 {
-		log.Fatalf("invalid sample size -k %d (maximum 1,000,000,001)\n", passwordCount)
+		return fmt.Errorf("invalid sample size -k %d (maximum 1,000,000,001)\n", passwordCount)
 	}
-
 	if skipUppercase && skipLowercase && skipSymbols && skipDigits {
-		log.Fatal("cannot generate password: all character classes are disabled\n")
+		return fmt.Errorf("%s", "cannot generate password: all character classes are disabled\n")
+	}
+	return nil
+}
+
+// ValidateRuntime parses CLI flags and enforces preconditions.
+// It calls log.Fatalf (which exits) on any invalid combination.
+func ValidateRuntime() {
+	flag.Parse()
+	if showVersion {
+		fmt.Printf("entpassgen %s\n", Version())
+		os.Exit(0)
+	}
+	err := validateConfig()
+	if err != nil {
+		log.Fatal(err)
 	}
 }
 
@@ -731,19 +733,21 @@ func run(password *Password, store *PasswordStore) {
 
 // printEntropyReport writes a human-readable entropy analysis to stderr.
 // Called when -a is set; stderr keeps stdout clean for piping.
-func printEntropyReport(s *Sample) {
-	fmt.Fprintf(os.Stderr, "\nEntropy Report:\n")
-	fmt.Fprintf(os.Stderr, "  Samples:     %d\n", s.Limit)
-	fmt.Fprintf(os.Stderr, "  Length:      %d\n", length)
-	fmt.Fprintf(os.Stderr, "  Uppercase:   %v\n", !skipUppercase)
-	fmt.Fprintf(os.Stderr, "  Lowercase:   %v\n", !skipLowercase)
-	fmt.Fprintf(os.Stderr, "  Digits:      %v\n", !skipDigits)
-	fmt.Fprintf(os.Stderr, "  Symbols:     %v\n", !skipSymbols)
-	fmt.Fprintf(os.Stderr, "  Use Words:   %v\n", useWords)
-	fmt.Fprintf(os.Stderr, "  Average:     %.3f\n", s.Average)
-	fmt.Fprintf(os.Stderr, "  Minimum:     %.3f\n", s.Min)
-	fmt.Fprintf(os.Stderr, "  Maximum:     %.3f\n", s.Max)
-	fmt.Fprintf(os.Stderr, "  Recommended: %.3f\n\n", s.Recommended)
+// printEntropyReport writes a human-readable entropy analysis to w.
+// In main(), w is os.Stderr. In tests, w is a bytes.Buffer.
+func printEntropyReport(s *Sample, w io.Writer) {
+	fmt.Fprintf(w, "\nEntropy Report:\n")
+	fmt.Fprintf(w, "  Samples:     %d\n", s.Limit)
+	fmt.Fprintf(w, "  Length:      %d\n", length)
+	fmt.Fprintf(w, "  Uppercase:   %v\n", !skipUppercase)
+	fmt.Fprintf(w, "  Lowercase:   %v\n", !skipLowercase)
+	fmt.Fprintf(w, "  Digits:      %v\n", !skipDigits)
+	fmt.Fprintf(w, "  Symbols:     %v\n", !skipSymbols)
+	fmt.Fprintf(w, "  Use Words:   %v\n", useWords)
+	fmt.Fprintf(w, "  Average:     %.3f\n", s.Average)
+	fmt.Fprintf(w, "  Minimum:     %.3f\n", s.Min)
+	fmt.Fprintf(w, "  Maximum:     %.3f\n", s.Max)
+	fmt.Fprintf(w, "  Recommended: %.3f\n\n", s.Recommended)
 }
 
 // ============================================================
@@ -777,7 +781,7 @@ func main() {
 	password.ParseEntropy()
 
 	if generateAverage {
-		printEntropyReport(password.Sample)
+		printEntropyReport(password.Sample, os.Stderr)
 	}
 
 	// Open output destination.
